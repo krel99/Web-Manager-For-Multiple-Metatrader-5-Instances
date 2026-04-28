@@ -1,0 +1,37 @@
+This system has a server component, a web interface and a metatrader 5 bot.
+
+## Web Interface
+
+Stack: Vanilla html, use existing CSS variables for styling in public/index.html
+
+This should allow me to input trades. These parameters are required to be in input UI:
+Required: symbol (EURUSD, GBPUSD, USDJPY, EURGBP, AUDUSD, AUDNZD, EURJPY, USDCAD, XAUUSD), direction (long|short), limit price, stop loss price, level_type (watch|order|option), valid until (time; default=20:00)
+Optional: take profit price, partial take profit price, level_size (default=none, options=watched|medium|large), time close (time; default=none - this is not a date but the time during the same day OR next day)
+
+None means no value, not "none"
+
+Date field and ID will be added automatically.
+
+Styling variables area already created at public/index.html
+
+The view should render historical trades below the input interface and if they were closed profitably based on the reports file. If they are not in the reports file and only exist as an order, they should be rendered as waiting.
+
+## Server
+
+Stack: Express JS
+
+Listens on port 3001.
+
+get requests to /<SYMBOL> will return all active trades. Only symbols with current date provide a non empty response. Trades are active if they are submitted today and have not expired yet.
+post requests to /<SYMBOL> will create a new trade.
+post requests to /reports/<SYMBOL> will append reports.json file with the result adding a close/exit price; These requests have to be deduplicated based on an ID, because I will be running multiple instances of MT5 bot and only want a single report per position.
+
+The server is also responsible for providing correct time. Inputs from the web interface are in Central European Time (which can be winter or summer). The server should work in UTC.
+
+## Metatrader 5 Bot
+
+polls the server every 10 minutes (http://37.46.211.146:3001/<SYMBOL>); Uses symbolname it is run on (the chart), but strips it only to the base name such as EURUSD if the name is EURUSD_ecn etc., looks for a valid string as per requires symbol names.
+a default variable of capital is set to 10000 (regardless of actual capital); with stoploss and limit price from the server, it calculates trade size risking only a preset amount of money (f.e. $40, this is MT5 input)
+it is responsible for handling partial profit if it is available. partial take profit is always 50% of the position rounded down
+it is responsible for cancelling limit orders, when they expire (time > valid_until)
+it sends reports to /reports/<SYMBOL> when closed or at the end of the day (if no full take profit; I'd handle those manually)
