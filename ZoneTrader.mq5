@@ -425,16 +425,13 @@ void PlaceFromTrade(const string elem)
    double sl        = JsonGetNumber(elem, "stop_loss",  0);
    string tpStr     = JsonGetString(elem, "take_profit");
    double tp        = (tpStr=="" ? 0 : (double)StringToDouble(tpStr));
-   string ltype     = JsonGetString(elem, "level_type");
    string okind     = JsonGetString(elem, "order_kind");
    bool   isMarket  = (okind == "market");
 
    if(id=="" || sl<=0) return;
    if(!isMarket && limit<=0) return;
-   // Only "order" level_type creates real orders.
-   // "watch" and "option" are informational; the server still returns them
-   // so the UI can show them, but the EA must skip them.
-   if(ltype != "order") return;
+   // level_type (watch/order/option) is record-keeping metadata only;
+   // every submitted trade is executed.
 
    if(ArrayContainsStr(g_knownIds, id)) return;
    if(OrderExistsForId(id) || PositionExistsForId(id)) { ArrayPushStr(g_knownIds, id); return; }
@@ -536,7 +533,6 @@ string g_cacheValidUntilUTC[];
 string g_cacheReportAtUTC[];
 string g_cacheCloseTimeUTC[];
 int    g_cacheCloseAfterMin[];
-string g_cacheLevelType[];
 
 void CacheServerTrades(const string &elems[])
 {
@@ -547,7 +543,6 @@ void CacheServerTrades(const string &elems[])
    ArrayResize(g_cacheReportAtUTC, 0);
    ArrayResize(g_cacheCloseTimeUTC, 0);
    ArrayResize(g_cacheCloseAfterMin, 0);
-   ArrayResize(g_cacheLevelType, 0);
    for(int i=0;i<ArraySize(elems);i++)
    {
       string id  = JsonGetString(elems[i], "id");
@@ -558,7 +553,6 @@ void CacheServerTrades(const string &elems[])
       string ct  = JsonGetString(elems[i], "close_time_utc");
       string cam = JsonGetString(elems[i], "close_after_minutes");
       int    cami = (cam=="" ? 0 : (int)StringToInteger(cam));
-      string lt  = JsonGetString(elems[i], "level_type");
       double p   = (ptp=="" ? 0 : (double)StringToDouble(ptp));
       int sz = ArraySize(g_cacheIds);
       ArrayResize(g_cacheIds,            sz+1);
@@ -568,7 +562,6 @@ void CacheServerTrades(const string &elems[])
       ArrayResize(g_cacheReportAtUTC,    sz+1);
       ArrayResize(g_cacheCloseTimeUTC,   sz+1);
       ArrayResize(g_cacheCloseAfterMin,  sz+1);
-      ArrayResize(g_cacheLevelType,      sz+1);
       g_cacheIds[sz]=id;
       g_cachePartialTP[sz]=p;
       g_cacheDirection[sz]=dir;
@@ -576,7 +569,6 @@ void CacheServerTrades(const string &elems[])
       g_cacheReportAtUTC[sz]=ra;
       g_cacheCloseTimeUTC[sz]=ct;
       g_cacheCloseAfterMin[sz]=cami;
-      g_cacheLevelType[sz]=lt;
    }
 }
 
