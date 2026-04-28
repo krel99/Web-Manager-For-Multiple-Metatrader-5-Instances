@@ -12,9 +12,8 @@
 //--- Inputs
 input string  ServerURL    = "http://37.46.211.146:3001";
 input double  RiskAmount   = 40.0;     // $ at risk per trade
-input double  Capital      = 10000.0;  // notional reference capital
 input int     PollMinutes  = 10;       // polling interval
-input int     SlippagePts  = 20;       // deviation in points
+input int     SlippagePts  = 20;       // deviation (points) for market entries, partial closes and auto-close
 
 CTrade trade;
 
@@ -95,6 +94,7 @@ void OnDeinit(const int reason) { EventKillTimer(); }
 void OnTimer()
 {
    ManagePartials();
+   ManageAutoClose();
    ManageExpiry();
    ManageEndOfDay();
    if(TimeCurrent() - g_lastPoll >= PollMinutes*60)
@@ -420,14 +420,18 @@ void PlaceFromTrade(const string elem)
 {
    string id        = JsonGetString(elem, "id");
    string direction = JsonGetString(elem, "direction");
-   double limit     = JsonGetNumber(elem, "limit_price", 0);
+   string limitStr  = JsonGetString(elem, "limit_price");
+   double limit     = (limitStr=="" ? 0 : (double)StringToDouble(limitStr));
    double sl        = JsonGetNumber(elem, "stop_loss",  0);
    string tpStr     = JsonGetString(elem, "take_profit");
    double tp        = (tpStr=="" ? 0 : (double)StringToDouble(tpStr));
    string ltype     = JsonGetString(elem, "level_type");
+   string okind     = JsonGetString(elem, "order_kind");
+   bool   isMarket  = (okind == "market");
 
-   if(id=="" || limit<=0 || sl<=0) return;
-   // Only "order" level_type creates real pending orders.
+   if(id=="" || sl<=0) return;
+   if(!isMarket && limit<=0) return;
+   // Only "order" level_type creates real orders.
    // "watch" and "option" are informational; the server still returns them
    // so the UI can show them, but the EA must skip them.
    if(ltype != "order") return;
@@ -436,19 +440,40 @@ void PlaceFromTrade(const string elem)
    if(OrderExistsForId(id) || PositionExistsForId(id)) { ArrayPushStr(g_knownIds, id); return; }
 
    string sym = _Symbol;
-   double lots = CalcLotSize(sym, limit, sl);
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+   // For market orders, size against the current execution price.
+   double sizingPrice = limit;
+   if(isMarket) sizingPrice = (direction=="long" ? ask : bid);
+
+   double lots = CalcLotSize(sym, sizingPrice, sl);
    if(lots<=0)
    {
       Print("ZoneTrader: lot size 0 for id=", id);
       return;
    }
 
-   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    bool ok=false;
    string comment = "ZT:" + id;
 
-   if(direction=="long")
+   if(isMarket)
+   {
+      // Sanity-check that SL is on the correct side of current price.
+      if(direction=="long")
+      {
+         if(sl >= ask) { Print("ZoneTrader: long market SL ", sl, " >= ask ", ask, ", skipping ", id); return; }
+         ok = trade.Buy(lots, sym, 0.0, sl, tp, comment);
+      }
+      else if(direction=="short")
+      {
+         if(sl <= bid) { Print("ZoneTrader: short market SL ", sl, " <= bid ", bid, ", skipping ", id); return; }
+         ok = trade.Sell(lots, sym, 0.0, sl, tp, comment);
+      }
+      if(ok)
+         Print("ZoneTrader: executed ", direction, " market lots=", lots, " id=", id);
+   }
+   else if(direction=="long")
    {
       if(limit >= ask)
       {
@@ -456,6 +481,7 @@ void PlaceFromTrade(const string elem)
          return;
       }
       ok = trade.BuyLimit(lots, limit, sym, sl, tp, ORDER_TIME_GTC, 0, comment);
+      if(ok) Print("ZoneTrader: placed long limit ", limit, " lots=", lots, " id=", id);
    }
    else if(direction=="short")
    {
@@ -465,11 +491,11 @@ void PlaceFromTrade(const string elem)
          return;
       }
       ok = trade.SellLimit(lots, limit, sym, sl, tp, ORDER_TIME_GTC, 0, comment);
+      if(ok) Print("ZoneTrader: placed short limit ", limit, " lots=", lots, " id=", id);
    }
 
    if(ok)
    {
-      Print("ZoneTrader: placed ", direction, " limit ", limit, " lots=", lots, " id=", id);
       ArrayPushStr(g_knownIds, id);
    }
    else
@@ -508,6 +534,7 @@ double g_cachePartialTP[];
 string g_cacheDirection[];
 string g_cacheValidUntilUTC[];
 string g_cacheReportAtUTC[];
+string g_cacheCloseTimeUTC[];
 string g_cacheLevelType[];
 
 void CacheServerTrades(const string &elems[])
@@ -517,6 +544,7 @@ void CacheServerTrades(const string &elems[])
    ArrayResize(g_cacheDirection, 0);
    ArrayResize(g_cacheValidUntilUTC, 0);
    ArrayResize(g_cacheReportAtUTC, 0);
+   ArrayResize(g_cacheCloseTimeUTC, 0);
    ArrayResize(g_cacheLevelType, 0);
    for(int i=0;i<ArraySize(elems);i++)
    {
@@ -525,6 +553,7 @@ void CacheServerTrades(const string &elems[])
       string ptp = JsonGetString(elems[i], "partial_take_profit");
       string vu  = JsonGetString(elems[i], "valid_until_utc");
       string ra  = JsonGetString(elems[i], "report_at_utc");
+      string ct  = JsonGetString(elems[i], "close_time_utc");
       string lt  = JsonGetString(elems[i], "level_type");
       double p   = (ptp=="" ? 0 : (double)StringToDouble(ptp));
       int sz = ArraySize(g_cacheIds);
@@ -533,12 +562,14 @@ void CacheServerTrades(const string &elems[])
       ArrayResize(g_cacheDirection,      sz+1);
       ArrayResize(g_cacheValidUntilUTC,  sz+1);
       ArrayResize(g_cacheReportAtUTC,    sz+1);
+      ArrayResize(g_cacheCloseTimeUTC,   sz+1);
       ArrayResize(g_cacheLevelType,      sz+1);
       g_cacheIds[sz]=id;
       g_cachePartialTP[sz]=p;
       g_cacheDirection[sz]=dir;
       g_cacheValidUntilUTC[sz]=vu;
       g_cacheReportAtUTC[sz]=ra;
+      g_cacheCloseTimeUTC[sz]=ct;
       g_cacheLevelType[sz]=lt;
    }
 }
@@ -587,6 +618,46 @@ void ManagePartials()
       else
       {
          Print("ZoneTrader: partial close failed id=", id, " err=", trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Auto-close: when close_time passes, force-close any live         |
+//| position for this id (and cancel a still-pending order). The     |
+//| reconcile / EoD step will pick up the resulting closing deal and |
+//| report the real exit price.                                      |
+//+------------------------------------------------------------------+
+void ManageAutoClose()
+{
+   datetime now = TimeGMT();
+   for(int i=0;i<ArraySize(g_cacheIds);i++)
+   {
+      string id = g_cacheIds[i];
+      if(id=="") continue;
+      string ct = g_cacheCloseTimeUTC[i];
+      if(ct=="") continue; // only auto-close when user explicitly set close_time
+      datetime deadline = ParseISO8601UTC(ct);
+      if(deadline==0 || now < deadline) continue;
+
+      // Cancel a still-pending order (limit never filled by close_time).
+      ulong ordTicket = FindOrderTicketForId(id);
+      if(ordTicket!=0)
+      {
+         if(trade.OrderDelete(ordTicket))
+            Print("ZoneTrader: close_time reached, cancelled pending id=", id);
+         else
+            Print("ZoneTrader: close_time cancel failed id=", id, " err=", trade.ResultRetcodeDescription());
+      }
+
+      // Close any open position for this id.
+      ulong posTicket = FindPositionTicketForId(id);
+      if(posTicket!=0)
+      {
+         if(trade.PositionClose(posTicket))
+            Print("ZoneTrader: close_time reached, closed position id=", id);
+         else
+            Print("ZoneTrader: close_time PositionClose failed id=", id, " err=", trade.ResultRetcodeDescription());
       }
    }
 }

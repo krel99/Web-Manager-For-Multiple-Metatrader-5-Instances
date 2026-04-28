@@ -9,13 +9,11 @@ const PORT = 3001;
 const TRADES_FILE = path.join(__dirname, "trades.json");
 const REPORTS_FILE = path.join(__dirname, "reports.json");
 
-const VALID_SYMBOLS = [
-  "EURUSD", "GBPUSD", "USDJPY", "EURGBP",
-  "AUDUSD", "AUDNZD", "EURJPY", "USDCAD", "XAUUSD",
-];
+const VALID_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "EURGBP", "AUDUSD", "AUDNZD", "EURJPY", "USDCAD", "XAUUSD"];
 const VALID_DIRECTIONS = ["long", "short"];
 const VALID_LEVEL_TYPES = ["watch", "order", "option"];
 const VALID_LEVEL_SIZES = ["watched", "medium", "large"];
+const VALID_ORDER_KINDS = ["limit", "market"];
 
 const TZ = "Europe/Berlin";
 
@@ -45,15 +43,26 @@ function tzOffsetMinutes(utcDate, timeZone) {
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hour12: false,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   });
   const parts = Object.fromEntries(
-    dtf.formatToParts(utcDate).filter(p => p.type !== "literal").map(p => [p.type, p.value])
+    dtf
+      .formatToParts(utcDate)
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value]),
   );
   const asUTC = Date.UTC(
-    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
-    Number(parts.hour === "24" ? "0" : parts.hour), Number(parts.minute), Number(parts.second)
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour === "24" ? "0" : parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
   );
   return (asUTC - utcDate.getTime()) / 60000;
 }
@@ -70,7 +79,10 @@ function zonedDateTimeToUTC(dateStr, timeStr, timeZone) {
 
 function todayInTZ(timeZone) {
   const dtf = new Intl.DateTimeFormat("en-CA", {
-    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   });
   return dtf.format(new Date());
 }
@@ -78,12 +90,20 @@ function todayInTZ(timeZone) {
 // Wall-clock parts ("now") in the given timeZone, as numbers.
 function nowPartsInTZ(timeZone) {
   const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone, hour12: false,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   });
   const parts = Object.fromEntries(
-    dtf.formatToParts(new Date()).filter(p => p.type !== "literal").map(p => [p.type, p.value])
+    dtf
+      .formatToParts(new Date())
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value]),
   );
   return {
     year: Number(parts.year),
@@ -110,12 +130,13 @@ function addDaysISO(dateStr, days) {
 // If a collision occurs in the same minute, append "-2", "-3", ...
 function generateTradeId(existingTrades) {
   const p = nowPartsInTZ(TZ);
-  const base = String(p.year).padStart(4, "0") +
-               String(p.month).padStart(2, "0") +
-               String(p.day).padStart(2, "0") +
-               String(p.hour).padStart(2, "0") +
-               String(p.minute).padStart(2, "0");
-  const taken = new Set(existingTrades.map(t => t.id));
+  const base =
+    String(p.year).padStart(4, "0") +
+    String(p.month).padStart(2, "0") +
+    String(p.day).padStart(2, "0") +
+    String(p.hour).padStart(2, "0") +
+    String(p.minute).padStart(2, "0");
+  const taken = new Set(existingTrades.map((t) => t.id));
   if (!taken.has(base)) return base;
   let n = 2;
   while (taken.has(`${base}-${n}`)) n++;
@@ -131,12 +152,19 @@ function validateTradeBody(b) {
   const errs = [];
   if (!validateSymbol(b.symbol)) errs.push("invalid symbol");
   if (!VALID_DIRECTIONS.includes(b.direction)) errs.push("invalid direction");
-  if (typeof b.limit_price !== "number" || !isFinite(b.limit_price)) errs.push("invalid limit_price");
+  if (b.order_kind != null && !VALID_ORDER_KINDS.includes(b.order_kind)) errs.push("invalid order_kind");
+  const orderKind = b.order_kind || "limit";
+  if (orderKind === "limit") {
+    if (typeof b.limit_price !== "number" || !isFinite(b.limit_price)) errs.push("invalid limit_price");
+  } else if (b.limit_price != null && (typeof b.limit_price !== "number" || !isFinite(b.limit_price))) {
+    errs.push("invalid limit_price");
+  }
   if (typeof b.stop_loss !== "number" || !isFinite(b.stop_loss)) errs.push("invalid stop_loss");
   if (!VALID_LEVEL_TYPES.includes(b.level_type)) errs.push("invalid level_type");
   if (!/^\d{2}:\d{2}$/.test(b.valid_until || "")) errs.push("invalid valid_until (HH:MM)");
   if (b.take_profit != null && (typeof b.take_profit !== "number" || !isFinite(b.take_profit))) errs.push("invalid take_profit");
-  if (b.partial_take_profit != null && (typeof b.partial_take_profit !== "number" || !isFinite(b.partial_take_profit))) errs.push("invalid partial_take_profit");
+  if (b.partial_take_profit != null && (typeof b.partial_take_profit !== "number" || !isFinite(b.partial_take_profit)))
+    errs.push("invalid partial_take_profit");
   if (b.level_size != null && !VALID_LEVEL_SIZES.includes(b.level_size)) errs.push("invalid level_size");
   if (b.close_time != null && b.close_time !== "" && !/^\d{2}:\d{2}$/.test(b.close_time)) errs.push("invalid close_time (HH:MM)");
   if (b.valid_until_next_day != null && typeof b.valid_until_next_day !== "boolean") errs.push("invalid valid_until_next_day");
@@ -155,7 +183,7 @@ app.post("/reports/:symbol", (req, res) => {
   if (typeof exit_price !== "number" || !isFinite(exit_price)) return res.status(400).json({ error: "invalid exit_price" });
 
   const reports = readJsonArray(REPORTS_FILE);
-  if (reports.some(r => r.id === id)) {
+  if (reports.some((r) => r.id === id)) {
     return res.status(409).json({ error: "duplicate report", id });
   }
   const report = {
@@ -193,9 +221,9 @@ app.get("/:symbol", (req, res) => {
   const nowUTC = new Date();
   const trades = readJsonArray(TRADES_FILE);
   const reports = readJsonArray(REPORTS_FILE);
-  const reportedIds = new Set(reports.map(r => r.id));
+  const reportedIds = new Set(reports.map((r) => r.id));
 
-  const active = trades.filter(t => {
+  const active = trades.filter((t) => {
     if (t.symbol !== symbol) return false;
     if (reportedIds.has(t.id)) return false;
     const horizon = t.report_at_utc || t.close_time_utc || t.valid_until_utc;
@@ -215,13 +243,9 @@ app.post("/:symbol", (req, res) => {
 
   const localDate = todayInTZ(TZ);
   const validUntilDate = body.valid_until_next_day ? addDaysISO(localDate, 1) : localDate;
-  const closeTimeDate = body.close_time
-    ? (body.close_time_next_day ? addDaysISO(localDate, 1) : localDate)
-    : null;
+  const closeTimeDate = body.close_time ? (body.close_time_next_day ? addDaysISO(localDate, 1) : localDate) : null;
   const validUntilUTC = zonedDateTimeToUTC(validUntilDate, body.valid_until, TZ);
-  const closeTimeUTC = body.close_time
-    ? zonedDateTimeToUTC(closeTimeDate, body.close_time, TZ)
-    : null;
+  const closeTimeUTC = body.close_time ? zonedDateTimeToUTC(closeTimeDate, body.close_time, TZ) : null;
 
   if (closeTimeUTC && closeTimeUTC.getTime() <= validUntilUTC.getTime()) {
     return res.status(400).json({
@@ -235,17 +259,17 @@ app.post("/:symbol", (req, res) => {
   // local day (Europe/Berlin) on which valid_until falls -> 23:59 of that date,
   // converted to UTC. This keeps the trade visible to the EA so it can send
   // an EoD report even when the user manages the position manually.
-  const reportAtUTC = closeTimeUTC
-    ? closeTimeUTC
-    : zonedDateTimeToUTC(validUntilDate, "23:59", TZ);
+  const reportAtUTC = closeTimeUTC ? closeTimeUTC : zonedDateTimeToUTC(validUntilDate, "23:59", TZ);
 
   const trades = readJsonArray(TRADES_FILE);
 
+  const orderKind = body.order_kind || "limit";
   const trade = {
     id: generateTradeId(trades),
     symbol,
     direction: body.direction,
-    limit_price: body.limit_price,
+    order_kind: orderKind,
+    limit_price: orderKind === "market" ? (body.limit_price ?? null) : body.limit_price,
     stop_loss: body.stop_loss,
     take_profit: body.take_profit ?? null,
     partial_take_profit: body.partial_take_profit ?? null,

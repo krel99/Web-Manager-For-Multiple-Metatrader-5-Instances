@@ -200,7 +200,6 @@
                 color: var(--muted);
             }
 
-
             .checkbox-row {
                 display: flex;
                 align-items: center;
@@ -287,6 +286,10 @@
                     <div class="field">
                         <label for="limit_price">Limit price *</label>
                         <input id="limit_price" name="limit_price" type="number" step="any" required />
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="market_order" name="market_order" />
+                            <span>market order (no limit price)</span>
+                        </label>
                     </div>
 
                     <div class="field">
@@ -401,9 +404,11 @@
                 const fd = new FormData(form);
                 const symbol = fd.get("symbol");
 
+                const isMarket = fd.get("market_order") === "on";
                 const body = {
                     direction: fd.get("direction"),
-                    limit_price: numberOrNull(fd.get("limit_price")),
+                    order_kind: isMarket ? "market" : "limit",
+                    limit_price: isMarket ? null : numberOrNull(fd.get("limit_price")),
                     stop_loss: numberOrNull(fd.get("stop_loss")),
                     take_profit: numberOrNull(fd.get("take_profit")),
                     partial_take_profit: numberOrNull(fd.get("partial_take_profit")),
@@ -424,10 +429,7 @@
                     const vuMin = toMin(body.valid_until, body.valid_until_next_day);
                     const ctMin = toMin(body.close_time, body.close_time_next_day);
                     if (ctMin <= vuMin) {
-                        setMessage(
-                            "Close time must be after Valid until (toggle 'next day' on Close time if it should fire after midnight).",
-                            "err",
-                        );
+                        setMessage("Close time must be after Valid until (toggle 'next day' on Close time if it should fire after midnight).", "err");
                         return;
                     }
                 }
@@ -450,6 +452,23 @@
                     setMessage("Failed: " + err.message, "err");
                 }
             });
+
+            // Market order toggle: disable & clear limit price when checked.
+            const marketOrderEl = document.getElementById("market_order");
+            const limitPriceEl = document.getElementById("limit_price");
+            function applyMarketOrderState() {
+                if (marketOrderEl.checked) {
+                    limitPriceEl.value = "";
+                    limitPriceEl.required = false;
+                    limitPriceEl.disabled = true;
+                } else {
+                    limitPriceEl.required = true;
+                    limitPriceEl.disabled = false;
+                }
+            }
+            marketOrderEl.addEventListener("change", applyMarketOrderState);
+            form.addEventListener("reset", () => setTimeout(applyMarketOrderState, 0));
+            applyMarketOrderState();
 
             // Auto-format time inputs: typing digits inserts ":" automatically.
             function formatTimeDigits(digits) {
@@ -515,6 +534,7 @@
                             }
                             const dirCls = t.direction === "long" ? "dir-long" : "dir-short";
                             const rowCls = t.direction === "long" ? "row-long" : "row-short";
+                            const limitCell = t.order_kind === "market" ? "MKT" : fmtPrice(t.limit_price);
                             return (
                                 '<tr class="' +
                                 rowCls +
@@ -531,7 +551,7 @@
                                 t.direction +
                                 "</td>" +
                                 "<td>" +
-                                fmtPrice(t.limit_price) +
+                                limitCell +
                                 "</td>" +
                                 "<td>" +
                                 fmtPrice(t.stop_loss) +
@@ -552,7 +572,7 @@
                                 ((t.valid_until || "") + (t.valid_until_next_day ? " (+1d)" : "")) +
                                 "</td>" +
                                 "<td>" +
-                                (t.close_time ? (t.close_time + (t.close_time_next_day ? " (+1d)" : "")) : "—") +
+                                (t.close_time ? t.close_time + (t.close_time_next_day ? " (+1d)" : "") : "—") +
                                 "</td>" +
                                 "<td>" +
                                 exitCell +
