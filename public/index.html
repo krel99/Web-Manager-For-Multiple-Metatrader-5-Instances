@@ -345,6 +345,12 @@
                         </label>
                     </div>
 
+                    <div class="field">
+                        <label for="close_after_minutes">Close after (min)</label>
+                        <input id="close_after_minutes" name="close_after_minutes" type="number" min="1" step="1" placeholder="e.g. 150" />
+                        <span class="checkbox-row"><span>minutes after fill (alt. to Close time)</span></span>
+                    </div>
+
                     <div class="row-actions">
                         <button type="reset" class="ghost">Reset</button>
                         <button type="submit" class="primary">Submit Trade</button>
@@ -405,6 +411,8 @@
                 const symbol = fd.get("symbol");
 
                 const isMarket = fd.get("market_order") === "on";
+                const closeAfterRaw = fd.get("close_after_minutes");
+                const closeAfterMinutes = closeAfterRaw === "" || closeAfterRaw === null ? null : Number(closeAfterRaw);
                 const body = {
                     direction: fd.get("direction"),
                     order_kind: isMarket ? "market" : "limit",
@@ -418,7 +426,17 @@
                     valid_until_next_day: fd.get("valid_until_next_day") === "on",
                     close_time: fd.get("close_time") || null,
                     close_time_next_day: fd.get("close_time_next_day") === "on",
+                    close_after_minutes: closeAfterMinutes,
                 };
+
+                if (body.close_time && body.close_after_minutes) {
+                    setMessage("Use either Close time or Close after — not both.", "err");
+                    return;
+                }
+                if (body.close_after_minutes != null && (!Number.isInteger(body.close_after_minutes) || body.close_after_minutes <= 0)) {
+                    setMessage("Close after must be a positive whole number of minutes.", "err");
+                    return;
+                }
 
                 // Client-side guard: close_time must be strictly after valid_until.
                 if (body.close_time) {
@@ -572,7 +590,11 @@
                                 ((t.valid_until || "") + (t.valid_until_next_day ? " (+1d)" : "")) +
                                 "</td>" +
                                 "<td>" +
-                                (t.close_time ? t.close_time + (t.close_time_next_day ? " (+1d)" : "") : "—") +
+                                (t.close_time
+                                    ? t.close_time + (t.close_time_next_day ? " (+1d)" : "")
+                                    : t.close_after_minutes
+                                      ? "+" + t.close_after_minutes + "m"
+                                      : "—") +
                                 "</td>" +
                                 "<td>" +
                                 exitCell +

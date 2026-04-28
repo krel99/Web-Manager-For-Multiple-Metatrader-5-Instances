@@ -535,6 +535,7 @@ string g_cacheDirection[];
 string g_cacheValidUntilUTC[];
 string g_cacheReportAtUTC[];
 string g_cacheCloseTimeUTC[];
+int    g_cacheCloseAfterMin[];
 string g_cacheLevelType[];
 
 void CacheServerTrades(const string &elems[])
@@ -545,6 +546,7 @@ void CacheServerTrades(const string &elems[])
    ArrayResize(g_cacheValidUntilUTC, 0);
    ArrayResize(g_cacheReportAtUTC, 0);
    ArrayResize(g_cacheCloseTimeUTC, 0);
+   ArrayResize(g_cacheCloseAfterMin, 0);
    ArrayResize(g_cacheLevelType, 0);
    for(int i=0;i<ArraySize(elems);i++)
    {
@@ -554,6 +556,8 @@ void CacheServerTrades(const string &elems[])
       string vu  = JsonGetString(elems[i], "valid_until_utc");
       string ra  = JsonGetString(elems[i], "report_at_utc");
       string ct  = JsonGetString(elems[i], "close_time_utc");
+      string cam = JsonGetString(elems[i], "close_after_minutes");
+      int    cami = (cam=="" ? 0 : (int)StringToInteger(cam));
       string lt  = JsonGetString(elems[i], "level_type");
       double p   = (ptp=="" ? 0 : (double)StringToDouble(ptp));
       int sz = ArraySize(g_cacheIds);
@@ -563,6 +567,7 @@ void CacheServerTrades(const string &elems[])
       ArrayResize(g_cacheValidUntilUTC,  sz+1);
       ArrayResize(g_cacheReportAtUTC,    sz+1);
       ArrayResize(g_cacheCloseTimeUTC,   sz+1);
+      ArrayResize(g_cacheCloseAfterMin,  sz+1);
       ArrayResize(g_cacheLevelType,      sz+1);
       g_cacheIds[sz]=id;
       g_cachePartialTP[sz]=p;
@@ -570,6 +575,7 @@ void CacheServerTrades(const string &elems[])
       g_cacheValidUntilUTC[sz]=vu;
       g_cacheReportAtUTC[sz]=ra;
       g_cacheCloseTimeUTC[sz]=ct;
+      g_cacheCloseAfterMin[sz]=cami;
       g_cacheLevelType[sz]=lt;
    }
 }
@@ -635,29 +641,49 @@ void ManageAutoClose()
    {
       string id = g_cacheIds[i];
       if(id=="") continue;
-      string ct = g_cacheCloseTimeUTC[i];
-      if(ct=="") continue; // only auto-close when user explicitly set close_time
-      datetime deadline = ParseISO8601UTC(ct);
-      if(deadline==0 || now < deadline) continue;
+      string ct      = g_cacheCloseTimeUTC[i];
+      int    afterMin = g_cacheCloseAfterMin[i];
 
-      // Cancel a still-pending order (limit never filled by close_time).
-      ulong ordTicket = FindOrderTicketForId(id);
-      if(ordTicket!=0)
+      // Mode A: absolute close_time (UTC deadline shared by order+position).
+      if(ct != "")
       {
-         if(trade.OrderDelete(ordTicket))
-            Print("ZoneTrader: close_time reached, cancelled pending id=", id);
-         else
-            Print("ZoneTrader: close_time cancel failed id=", id, " err=", trade.ResultRetcodeDescription());
+         datetime deadline = ParseISO8601UTC(ct);
+         if(deadline==0 || now < deadline) continue;
+
+         ulong ordTicket = FindOrderTicketForId(id);
+         if(ordTicket!=0)
+         {
+            if(trade.OrderDelete(ordTicket))
+               Print("ZoneTrader: close_time reached, cancelled pending id=", id);
+            else
+               Print("ZoneTrader: close_time cancel failed id=", id, " err=", trade.ResultRetcodeDescription());
+         }
+         ulong posTicket = FindPositionTicketForId(id);
+         if(posTicket!=0)
+         {
+            if(trade.PositionClose(posTicket))
+               Print("ZoneTrader: close_time reached, closed position id=", id);
+            else
+               Print("ZoneTrader: close_time PositionClose failed id=", id, " err=", trade.ResultRetcodeDescription());
+         }
+         continue;
       }
 
-      // Close any open position for this id.
-      ulong posTicket = FindPositionTicketForId(id);
-      if(posTicket!=0)
+      // Mode B: close N minutes after fill. Pending orders aren't touched
+      // here -- ManageExpiry handles those at valid_until. We only act once
+      // a position exists for this id.
+      if(afterMin > 0)
       {
+         ulong posTicket = FindPositionTicketForId(id);
+         if(posTicket==0) continue;
+         if(!PositionSelectByTicket(posTicket)) continue;
+         datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
+         if(opened==0) continue;
+         if(now - opened < (long)afterMin * 60) continue;
          if(trade.PositionClose(posTicket))
-            Print("ZoneTrader: close_time reached, closed position id=", id);
+            Print("ZoneTrader: close_after_minutes (", afterMin, ") elapsed, closed position id=", id);
          else
-            Print("ZoneTrader: close_time PositionClose failed id=", id, " err=", trade.ResultRetcodeDescription());
+            Print("ZoneTrader: close_after_minutes PositionClose failed id=", id, " err=", trade.ResultRetcodeDescription());
       }
    }
 }

@@ -169,6 +169,12 @@ function validateTradeBody(b) {
   if (b.close_time != null && b.close_time !== "" && !/^\d{2}:\d{2}$/.test(b.close_time)) errs.push("invalid close_time (HH:MM)");
   if (b.valid_until_next_day != null && typeof b.valid_until_next_day !== "boolean") errs.push("invalid valid_until_next_day");
   if (b.close_time_next_day != null && typeof b.close_time_next_day !== "boolean") errs.push("invalid close_time_next_day");
+  if (b.close_after_minutes != null && b.close_after_minutes !== "") {
+    if (!Number.isInteger(b.close_after_minutes) || b.close_after_minutes <= 0) {
+      errs.push("invalid close_after_minutes (positive integer)");
+    }
+    if (b.close_time) errs.push("close_time and close_after_minutes are mutually exclusive");
+  }
   return errs;
 }
 
@@ -255,11 +261,21 @@ app.post("/:symbol", (req, res) => {
   }
 
   // report_at_utc: deadline by which the EA must have sent a report.
-  // If close_time is set, that is the cutoff. Otherwise it is the end of the
-  // local day (Europe/Berlin) on which valid_until falls -> 23:59 of that date,
-  // converted to UTC. This keeps the trade visible to the EA so it can send
-  // an EoD report even when the user manages the position manually.
-  const reportAtUTC = closeTimeUTC ? closeTimeUTC : zonedDateTimeToUTC(validUntilDate, "23:59", TZ);
+  // If close_time is set, that is the cutoff.
+  // If close_after_minutes is set, the latest possible auto-close is
+  // valid_until_utc + close_after_minutes (since the limit can fill at the
+  // last allowed moment); add a 60-minute buffer so the EA can still see the
+  // trade while it sends the report after closing.
+  // Otherwise default to 23:59 local of the valid_until date.
+  const closeAfterMinutes = body.close_after_minutes != null && body.close_after_minutes !== "" ? Number(body.close_after_minutes) : null;
+  let reportAtUTC;
+  if (closeTimeUTC) {
+    reportAtUTC = closeTimeUTC;
+  } else if (closeAfterMinutes) {
+    reportAtUTC = new Date(validUntilUTC.getTime() + (closeAfterMinutes + 60) * 60_000);
+  } else {
+    reportAtUTC = zonedDateTimeToUTC(validUntilDate, "23:59", TZ);
+  }
 
   const trades = readJsonArray(TRADES_FILE);
 
@@ -279,6 +295,7 @@ app.post("/:symbol", (req, res) => {
     valid_until_next_day: !!body.valid_until_next_day,
     close_time: body.close_time || null,
     close_time_next_day: body.close_time ? !!body.close_time_next_day : false,
+    close_after_minutes: closeAfterMinutes,
     local_date: localDate,
     timezone: TZ,
     valid_until_utc: validUntilUTC.toISOString(),
