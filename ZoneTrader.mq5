@@ -427,6 +427,7 @@ void PlaceFromTrade(const string elem)
    double tp        = (tpStr=="" ? 0 : (double)StringToDouble(tpStr));
    string okind     = JsonGetString(elem, "order_kind");
    bool   isMarket  = (okind == "market");
+   string vu        = JsonGetString(elem, "valid_until_utc");
 
    if(id=="" || sl<=0) return;
    if(!isMarket && limit<=0) return;
@@ -435,6 +436,22 @@ void PlaceFromTrade(const string elem)
 
    if(ArrayContainsStr(g_knownIds, id)) return;
    if(OrderExistsForId(id) || PositionExistsForId(id)) { ArrayPushStr(g_knownIds, id); return; }
+
+   // Refuse to open a trade whose valid_until has already passed. Market
+   // orders cannot be "cancelled" after submission, and there is no point
+   // placing a limit order that ManageExpiry would just delete on the next
+   // tick. valid_until_utc is the authoritative deadline (the server resolves
+   // local_date + valid_until + valid_until_next_day for us).
+   if(vu != "")
+   {
+      datetime exp = ParseISO8601UTC(vu);
+      if(exp != 0 && TimeGMT() >= exp)
+      {
+         Print("ZoneTrader: skipping expired trade id=", id,
+               " valid_until_utc=", vu, " (now ", TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS), " UTC)");
+         return;
+      }
+   }
 
    string sym = _Symbol;
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
@@ -628,7 +645,10 @@ void ManagePartials()
 //+------------------------------------------------------------------+
 void ManageAutoClose()
 {
-   datetime now = TimeGMT();
+   // UTC clock for absolute deadlines (close_time_utc); broker server clock
+   // for elapsed-since-open math because POSITION_TIME is in server time.
+   datetime nowUTC    = TimeGMT();
+   datetime nowServer = TimeCurrent();
    for(int i=0;i<ArraySize(g_cacheIds);i++)
    {
       string id = g_cacheIds[i];
@@ -640,7 +660,7 @@ void ManageAutoClose()
       if(ct != "")
       {
          datetime deadline = ParseISO8601UTC(ct);
-         if(deadline==0 || now < deadline) continue;
+         if(deadline==0 || nowUTC < deadline) continue;
 
          ulong ordTicket = FindOrderTicketForId(id);
          if(ordTicket!=0)
@@ -671,7 +691,11 @@ void ManageAutoClose()
          if(!PositionSelectByTicket(posTicket)) continue;
          datetime opened = (datetime)PositionGetInteger(POSITION_TIME);
          if(opened==0) continue;
-         if(now - opened < (long)afterMin * 60) continue;
+         // POSITION_TIME is in broker server time -- compare against
+         // TimeCurrent(), NOT TimeGMT(), otherwise the result is offset by
+         // the broker's timezone (typically GMT+2/+3) and the close fires
+         // hours late or, with unsigned datetime arithmetic, not at all.
+         if((long)nowServer - (long)opened < (long)afterMin * 60) continue;
          if(trade.PositionClose(posTicket))
             Print("ZoneTrader: close_after_minutes (", afterMin, ") elapsed, closed position id=", id);
          else
