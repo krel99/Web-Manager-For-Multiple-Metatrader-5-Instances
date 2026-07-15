@@ -4,7 +4,7 @@
 //|  manages partial TPs, cancels expired pendings, sends reports.   |
 //+------------------------------------------------------------------+
 #property copyright "ZoneTrader"
-#property version   "1.10"
+#property version   "1.11"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -12,7 +12,7 @@
 //--- Inputs
 input string  ServerURL    = "http://37.46.211.146:3001";
 input double  RiskAmount   = 40.0;     // $ at risk per trade
-input int     PollMinutes  = 10;       // polling interval
+input int     PollMinutes  = 1;       // polling interval
 input int     SlippagePts  = 20;       // deviation (points) for market entries, partial closes and auto-close
 
 CTrade trade;
