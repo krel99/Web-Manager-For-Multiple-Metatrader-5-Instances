@@ -15,26 +15,25 @@ npm start
 
 Open `http://localhost:3001/`.
 
-Data is persisted as flat JSON files next to `index.js`:
-
-- `trades.json` — every submitted trade.
-- `reports.json` — every closed-trade report from MT5.
+Active trades are persisted in `trades.json` next to `index.js`. Past
+trades are not kept: expired ones are dropped from the file whenever a new
+trade is saved. Positions are not tracked and nothing is reported back.
 
 ## Time zones
 
 The web UI submits times in **CET/CEST** (`Europe/Berlin`). The server
 converts them to UTC at write-time (`valid_until_utc`, `close_time_utc`)
 and stores the original `HH:MM` strings as `valid_until` / `close_time`.
+`close_time` falls on the same day as `valid_until`.
 
 ## API
 
-- `GET /<SYMBOL>` — active (today, not expired, not yet reported) trades.
+- `GET /<SYMBOL>` — active trades (`active_until_utc` still in the future).
 - `POST /<SYMBOL>` — create a trade. Body fields:
   `direction`, `limit_price`, `stop_loss`, `level_type`, `valid_until` (HH:MM),
-  optional: `take_profit`, `partial_take_profit`, `level_size`, `close_time`.
-- `POST /reports/<SYMBOL>` — append a report. Body:
-  `id`, `exit_price`, optional `exit_reason`, `exit_time`. Returns `409` on duplicate `id`.
-- `GET /trades`, `GET /reports` — full history (used by the UI).
+  optional: `take_profit`, `partial_take_profit`, `level_size`, `close_time`,
+  `close_after_minutes`, `manual_close`. `close_time`, `close_after_minutes`
+  and `manual_close` are mutually exclusive.
 
 ## MT5 EA
 
@@ -78,7 +77,7 @@ Behavior:
   volume rounded **down** to the volume step. **Stop loss is not
   moved.**
 - Cancels still-pending orders whose `valid_until_utc` has passed.
-- On exit (SL/TP/manual close, deal `DEAL_ENTRY_OUT`), `POST`s to
-  `/reports/<BASE>`. Duplicate `409`s are treated as success so multiple
-  EA instances on the same trade do not double-report.
+- Closes the position at `close_time` or `close_after_minutes` after fill
+  when one is set. With neither (`manual_close`), the EA never closes it.
+- Does not report closed positions anywhere.
 # Web-Manager-For-Multiple-Metatrader-5-Instances
