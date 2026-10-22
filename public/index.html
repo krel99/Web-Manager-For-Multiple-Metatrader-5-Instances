@@ -43,14 +43,6 @@
                 margin: 0 0 16px;
                 letter-spacing: 0.3px;
             }
-            h2 {
-                font-size: 14px;
-                font-weight: 600;
-                margin: 24px 0 8px;
-                color: var(--muted);
-                text-transform: uppercase;
-                letter-spacing: 0.6px;
-            }
 
             .card {
                 background: var(--surface);
@@ -131,75 +123,6 @@
                 color: var(--sell);
             }
 
-            table {
-                width: 100%;
-                border-collapse: collapse;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                overflow: hidden;
-                font-family: var(--mono);
-                font-size: 12.5px;
-            }
-            th,
-            td {
-                padding: 8px 10px;
-                text-align: left;
-                border-bottom: 1px solid var(--border);
-                white-space: nowrap;
-            }
-            th {
-                background: var(--bg);
-                font-weight: 600;
-                color: var(--muted);
-                font-size: 11px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-            tr:last-child td {
-                border-bottom: 0;
-            }
-            .dir-long {
-                color: var(--buy);
-                font-weight: 600;
-            }
-            .dir-short {
-                color: var(--sell);
-                font-weight: 600;
-            }
-            .row-long {
-                background: var(--buy-dim);
-            }
-            .row-short {
-                background: var(--sell-dim);
-            }
-
-            .tag {
-                display: inline-block;
-                padding: 2px 8px;
-                border-radius: 999px;
-                font-size: 11px;
-                font-family: -apple-system, sans-serif;
-                font-weight: 600;
-                letter-spacing: 0.3px;
-            }
-            .tag.win {
-                background: var(--buy-dim);
-                color: var(--buy);
-            }
-            .tag.loss {
-                background: var(--sell-dim);
-                color: var(--sell);
-            }
-            .tag.waiting {
-                background: #1455b314;
-                color: var(--watched);
-            }
-            .tag.expired {
-                background: #00000010;
-                color: var(--muted);
-            }
-
             .checkbox-row {
                 display: flex;
                 align-items: center;
@@ -217,20 +140,10 @@
                 padding: 0;
                 cursor: pointer;
             }
-            .muted {
-                color: var(--muted);
-            }
 
             @media (max-width: 760px) {
                 form.grid {
                     grid-template-columns: repeat(2, 1fr);
-                }
-                table {
-                    font-size: 11.5px;
-                }
-                th,
-                td {
-                    padding: 6px;
                 }
             }
         </style>
@@ -341,8 +254,8 @@
                             maxlength="5"
                         />
                         <label class="checkbox-row">
-                            <input type="checkbox" id="close_time_next_day" name="close_time_next_day" />
-                            <span>next day</span>
+                            <input type="checkbox" id="manual_close" name="manual_close" />
+                            <span>close manually (no auto-close)</span>
                         </label>
                     </div>
 
@@ -359,34 +272,6 @@
 
                     <div id="message" class="full"></div>
                 </form>
-            </div>
-
-            <h2>History</h2>
-            <div style="overflow-x: auto">
-                <table id="history-table">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Symbol</th>
-                            <th>Dir</th>
-                            <th>Limit</th>
-                            <th>SL</th>
-                            <th>TP</th>
-                            <th>Partial</th>
-                            <th>Type</th>
-                            <th>Size</th>
-                            <th>Valid until</th>
-                            <th>Close time</th>
-                            <th>Exit</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody id="history-body">
-                        <tr>
-                            <td colspan="13" class="muted">Loading…</td>
-                        </tr>
-                    </tbody>
-                </table>
             </div>
         </div>
 
@@ -426,8 +311,8 @@
                     valid_until: fd.get("valid_until"),
                     valid_until_next_day: fd.get("valid_until_next_day") === "on",
                     close_time: fd.get("close_time") || null,
-                    close_time_next_day: fd.get("close_time_next_day") === "on",
                     close_after_minutes: closeAfterMinutes,
+                    manual_close: fd.get("manual_close") === "on",
                 };
 
                 if (body.close_time && body.close_after_minutes) {
@@ -439,16 +324,14 @@
                     return;
                 }
 
-                // Client-side guard: close_time must be strictly after valid_until.
+                // Client-side guard: close_time (same day as valid_until) must be strictly after valid_until.
                 if (body.close_time) {
-                    const toMin = (t, nextDay) => {
+                    const toMin = (t) => {
                         const [h, m] = t.split(":").map(Number);
-                        return h * 60 + m + (nextDay ? 24 * 60 : 0);
+                        return h * 60 + m;
                     };
-                    const vuMin = toMin(body.valid_until, body.valid_until_next_day);
-                    const ctMin = toMin(body.close_time, body.close_time_next_day);
-                    if (ctMin <= vuMin) {
-                        setMessage("Close time must be after Valid until (toggle 'next day' on Close time if it should fire after midnight).", "err");
+                    if (toMin(body.close_time) <= toMin(body.valid_until)) {
+                        setMessage("Close time must be after Valid until.", "err");
                         return;
                     }
                 }
@@ -466,7 +349,6 @@
                     setMessage("Trade submitted.", "ok");
                     form.reset();
                     document.getElementById("valid_until").value = "15:59";
-                    loadHistory();
                 } catch (err) {
                     setMessage("Failed: " + err.message, "err");
                 }
@@ -489,6 +371,19 @@
             form.addEventListener("reset", () => setTimeout(applyMarketOrderState, 0));
             applyMarketOrderState();
 
+            // Manual close toggle: disable & clear the auto-close inputs when checked.
+            const manualCloseEl = document.getElementById("manual_close");
+            const autoCloseEls = [document.getElementById("close_time"), document.getElementById("close_after_minutes")];
+            function applyManualCloseState() {
+                autoCloseEls.forEach((el) => {
+                    if (manualCloseEl.checked) el.value = "";
+                    el.disabled = manualCloseEl.checked;
+                });
+            }
+            manualCloseEl.addEventListener("change", applyManualCloseState);
+            form.addEventListener("reset", () => setTimeout(applyManualCloseState, 0));
+            applyManualCloseState();
+
             // Auto-format time inputs: typing digits inserts ":" automatically.
             function formatTimeDigits(digits) {
                 digits = digits.replace(/\D/g, "").slice(0, 4);
@@ -510,110 +405,6 @@
                     if (digits.length === 4) e.target.value = digits.slice(0, 2) + ":" + digits.slice(2);
                 });
             });
-
-            function fmtPrice(v) {
-                if (v === null || v === undefined) return "—";
-                return Number(v).toString();
-            }
-
-            function isProfitable(trade, exitPrice) {
-                if (trade.direction === "long") return exitPrice > trade.limit_price;
-                if (trade.direction === "short") return exitPrice < trade.limit_price;
-                return false;
-            }
-
-            async function loadHistory() {
-                const body = document.getElementById("history-body");
-                try {
-                    const [tradesRes, reportsRes] = await Promise.all([fetch("/trades"), fetch("/reports")]);
-                    const trades = await tradesRes.json();
-                    const reports = await reportsRes.json();
-                    const reportById = new Map(reports.map((r) => [r.id, r]));
-
-                    const sorted = trades.slice().sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-
-                    if (!sorted.length) {
-                        body.innerHTML = '<tr><td colspan="13" class="muted">No trades yet.</td></tr>';
-                        return;
-                    }
-
-                    const now = Date.now();
-                    body.innerHTML = sorted
-                        .map((t) => {
-                            const report = reportById.get(t.id);
-                            let status, exitCell;
-                            if (report) {
-                                const win = isProfitable(t, report.exit_price);
-                                status = '<span class="tag ' + (win ? "win" : "loss") + '">' + (win ? "Profit" : "Loss") + "</span>";
-                                exitCell = fmtPrice(report.exit_price);
-                            } else {
-                                const expired = t.valid_until_utc && new Date(t.valid_until_utc).getTime() <= now;
-                                status = expired ? '<span class="tag expired">Expired</span>' : '<span class="tag waiting">Waiting</span>';
-                                exitCell = "—";
-                            }
-                            const dirCls = t.direction === "long" ? "dir-long" : "dir-short";
-                            const rowCls = t.direction === "long" ? "row-long" : "row-short";
-                            const limitCell = t.order_kind === "market" ? "MKT" : fmtPrice(t.limit_price);
-                            return (
-                                '<tr class="' +
-                                rowCls +
-                                '">' +
-                                "<td>" +
-                                (t.local_date || "") +
-                                "</td>" +
-                                "<td>" +
-                                t.symbol +
-                                "</td>" +
-                                '<td class="' +
-                                dirCls +
-                                '">' +
-                                t.direction +
-                                "</td>" +
-                                "<td>" +
-                                limitCell +
-                                "</td>" +
-                                "<td>" +
-                                fmtPrice(t.stop_loss) +
-                                "</td>" +
-                                "<td>" +
-                                fmtPrice(t.take_profit) +
-                                "</td>" +
-                                "<td>" +
-                                fmtPrice(t.partial_take_profit) +
-                                "</td>" +
-                                "<td>" +
-                                (t.level_type || "") +
-                                "</td>" +
-                                "<td>" +
-                                (t.level_size || "—") +
-                                "</td>" +
-                                "<td>" +
-                                ((t.valid_until || "") + (t.valid_until_next_day ? " (+1d)" : "")) +
-                                "</td>" +
-                                "<td>" +
-                                (t.close_time
-                                    ? t.close_time + (t.close_time_next_day ? " (+1d)" : "")
-                                    : t.close_after_minutes
-                                      ? "+" + t.close_after_minutes + "m"
-                                      : "—") +
-                                "</td>" +
-                                "<td>" +
-                                exitCell +
-                                "</td>" +
-                                "<td>" +
-                                status +
-                                "</td>" +
-                                "</tr>"
-                            );
-                        })
-                        .join("");
-                } catch (e) {
-                    body.innerHTML = '<tr><td colspan="13" class="err">Failed to load history: ' + e.message + "</td></tr>";
-                }
-            }
-
-            loadHistory();
-            setInterval(loadHistory, 30000);
         </script>
     </body>
 </html>

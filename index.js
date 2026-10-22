@@ -7,7 +7,6 @@ const app = express();
 const PORT = 3001;
 
 const TRADES_FILE = path.join(__dirname, "trades.json");
-const REPORTS_FILE = path.join(__dirname, "reports.json");
 
 const VALID_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "EURGBP", "AUDUSD", "AUDNZD", "EURJPY", "USDCAD", "XAUUSD"];
 const VALID_DIRECTIONS = ["long", "short"];
@@ -168,74 +167,41 @@ function validateTradeBody(b) {
   if (b.level_size != null && !VALID_LEVEL_SIZES.includes(b.level_size)) errs.push("invalid level_size");
   if (b.close_time != null && b.close_time !== "" && !/^\d{2}:\d{2}$/.test(b.close_time)) errs.push("invalid close_time (HH:MM)");
   if (b.valid_until_next_day != null && typeof b.valid_until_next_day !== "boolean") errs.push("invalid valid_until_next_day");
-  if (b.close_time_next_day != null && typeof b.close_time_next_day !== "boolean") errs.push("invalid close_time_next_day");
+  if (b.manual_close != null && typeof b.manual_close !== "boolean") errs.push("invalid manual_close");
   if (b.close_after_minutes != null && b.close_after_minutes !== "") {
     if (!Number.isInteger(b.close_after_minutes) || b.close_after_minutes <= 0) {
       errs.push("invalid close_after_minutes (positive integer)");
     }
     if (b.close_time) errs.push("close_time and close_after_minutes are mutually exclusive");
   }
+  if (b.manual_close && (b.close_time || (b.close_after_minutes != null && b.close_after_minutes !== ""))) {
+    errs.push("manual_close excludes close_time and close_after_minutes");
+  }
   return errs;
+}
+
+// A trade is active while its active_until_utc is in the future. Past trades
+// are not kept: they are dropped from trades.json whenever a new trade is saved.
+// (report_at_utc is the same deadline on trades saved by older versions.)
+function isActive(t, nowMs) {
+  const horizon = t.active_until_utc || t.report_at_utc;
+  if (!horizon) return false;
+  return new Date(horizon).getTime() > nowMs;
 }
 
 // ---------- Routes ----------
 
-app.post("/reports/:symbol", (req, res) => {
-  const symbol = req.params.symbol.toUpperCase();
-  if (!validateSymbol(symbol)) return res.status(400).json({ error: "invalid symbol" });
-
-  const { id, exit_price, exit_reason, exit_time } = req.body || {};
-  if (!id || typeof id !== "string") return res.status(400).json({ error: "missing id" });
-  if (typeof exit_price !== "number" || !isFinite(exit_price)) return res.status(400).json({ error: "invalid exit_price" });
-
-  const reports = readJsonArray(REPORTS_FILE);
-  if (reports.some((r) => r.id === id)) {
-    return res.status(409).json({ error: "duplicate report", id });
-  }
-  const report = {
-    id,
-    symbol,
-    exit_price,
-    exit_reason: exit_reason || "unknown",
-    exit_time: exit_time || new Date().toISOString(),
-    received_at: new Date().toISOString(),
-  };
-  reports.push(report);
-  writeJsonArray(REPORTS_FILE, reports);
-  res.status(201).json(report);
-});
-
-app.get("/reports", (_req, res) => {
-  res.json(readJsonArray(REPORTS_FILE));
-});
-
-app.get("/trades", (_req, res) => {
-  res.json(readJsonArray(TRADES_FILE));
-});
-
 // GET /<SYMBOL> - active trades the EA must still manage.
-// Returns trades for this symbol that have not yet been reported AND whose
-// report_at_utc is still in the future. This intentionally does NOT filter on
-// local_date so that:
+// This intentionally does NOT filter on local_date so that:
 //   - trades using "valid_until next day" remain visible after midnight
 //   - trades whose limit has filled and become a position remain visible so
-//     the EA can manage partial TP / EoD reporting even after a restart
+//     the EA can manage partial TP / auto-close even after a restart
 app.get("/:symbol", (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   if (!validateSymbol(symbol)) return res.status(400).json({ error: "invalid symbol" });
 
-  const nowUTC = new Date();
-  const trades = readJsonArray(TRADES_FILE);
-  const reports = readJsonArray(REPORTS_FILE);
-  const reportedIds = new Set(reports.map((r) => r.id));
-
-  const active = trades.filter((t) => {
-    if (t.symbol !== symbol) return false;
-    if (reportedIds.has(t.id)) return false;
-    const horizon = t.report_at_utc || t.close_time_utc || t.valid_until_utc;
-    if (!horizon) return false;
-    return new Date(horizon).getTime() > nowUTC.getTime();
-  });
+  const now = Date.now();
+  const active = readJsonArray(TRADES_FILE).filter((t) => t.symbol === symbol && isActive(t, now));
   res.json(active);
 });
 
@@ -249,35 +215,36 @@ app.post("/:symbol", (req, res) => {
 
   const localDate = todayInTZ(TZ);
   const validUntilDate = body.valid_until_next_day ? addDaysISO(localDate, 1) : localDate;
-  const closeTimeDate = body.close_time ? (body.close_time_next_day ? addDaysISO(localDate, 1) : localDate) : null;
   const validUntilUTC = zonedDateTimeToUTC(validUntilDate, body.valid_until, TZ);
-  const closeTimeUTC = body.close_time ? zonedDateTimeToUTC(closeTimeDate, body.close_time, TZ) : null;
+  // close_time falls on the same day as valid_until.
+  const closeTimeUTC = body.close_time ? zonedDateTimeToUTC(validUntilDate, body.close_time, TZ) : null;
 
   if (closeTimeUTC && closeTimeUTC.getTime() <= validUntilUTC.getTime()) {
     return res.status(400).json({
       error: "validation failed",
-      details: ["close_time must be after valid_until (use 'next day' if needed)"],
+      details: ["close_time must be after valid_until"],
     });
   }
 
-  // report_at_utc: deadline by which the EA must have sent a report.
+  // active_until_utc: how long GET /<SYMBOL> keeps serving the trade to the EA.
   // If close_time is set, that is the cutoff.
   // If close_after_minutes is set, the latest possible auto-close is
   // valid_until_utc + close_after_minutes (since the limit can fill at the
-  // last allowed moment); add a 60-minute buffer so the EA can still see the
-  // trade while it sends the report after closing.
-  // Otherwise default to 23:59 local of the valid_until date.
+  // last allowed moment); add a 60-minute buffer so the EA still sees the
+  // trade when the close is due.
+  // Otherwise (manual close) default to 23:59 local of the valid_until date.
   const closeAfterMinutes = body.close_after_minutes != null && body.close_after_minutes !== "" ? Number(body.close_after_minutes) : null;
-  let reportAtUTC;
+  let activeUntilUTC;
   if (closeTimeUTC) {
-    reportAtUTC = closeTimeUTC;
+    activeUntilUTC = closeTimeUTC;
   } else if (closeAfterMinutes) {
-    reportAtUTC = new Date(validUntilUTC.getTime() + (closeAfterMinutes + 60) * 60_000);
+    activeUntilUTC = new Date(validUntilUTC.getTime() + (closeAfterMinutes + 60) * 60_000);
   } else {
-    reportAtUTC = zonedDateTimeToUTC(validUntilDate, "23:59", TZ);
+    activeUntilUTC = zonedDateTimeToUTC(validUntilDate, "23:59", TZ);
   }
 
-  const trades = readJsonArray(TRADES_FILE);
+  const now = Date.now();
+  const trades = readJsonArray(TRADES_FILE).filter((t) => isActive(t, now));
 
   const orderKind = body.order_kind || "limit";
   const trade = {
@@ -294,13 +261,13 @@ app.post("/:symbol", (req, res) => {
     valid_until: body.valid_until,
     valid_until_next_day: !!body.valid_until_next_day,
     close_time: body.close_time || null,
-    close_time_next_day: body.close_time ? !!body.close_time_next_day : false,
     close_after_minutes: closeAfterMinutes,
+    manual_close: !!body.manual_close,
     local_date: localDate,
     timezone: TZ,
     valid_until_utc: validUntilUTC.toISOString(),
     close_time_utc: closeTimeUTC ? closeTimeUTC.toISOString() : null,
-    report_at_utc: reportAtUTC.toISOString(),
+    active_until_utc: activeUntilUTC.toISOString(),
     created_at: new Date().toISOString(),
   };
 

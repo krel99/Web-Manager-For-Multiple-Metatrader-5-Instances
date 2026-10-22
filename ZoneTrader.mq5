@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                                  ZoneTrader.mq5  |
 //|  Polls zoneTrader server for trade levels, places limit orders,  |
-//|  manages partial TPs, cancels expired pendings, sends reports.   |
+//|  manages partial TPs, cancels expired pendings, auto-closes.     |
 //+------------------------------------------------------------------+
 #property copyright "ZoneTrader"
-#property version   "1.11"
+#property version   "1.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -52,10 +52,9 @@ string g_baseSymbol = "";
 int    g_magic      = 0;
 datetime g_lastPoll = 0;
 
-//--- in-memory tracking
+//--- in-memory dedup (placement, partial TP)
 string g_knownIds[];
 string g_partialDoneIds[];
-string g_reportedIds[];
 
 //+------------------------------------------------------------------+
 bool ArrayContainsStr(const string &arr[], const string val)
@@ -96,42 +95,8 @@ void OnTimer()
    ManagePartials();
    ManageAutoClose();
    ManageExpiry();
-   ManageEndOfDay();
    if(TimeCurrent() - g_lastPoll >= PollMinutes*60)
       PollAndAct();
-}
-
-void OnTradeTransaction(const MqlTradeTransaction& trans,
-                        const MqlTradeRequest& req,
-                        const MqlTradeResult& res)
-{
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
-   ulong dealTicket = trans.deal;
-   if(dealTicket==0) return;
-   if(!HistoryDealSelect(dealTicket)) return;
-
-   long magic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-   if(magic != g_magic) return;
-   long entry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) return;
-
-   string comment = HistoryDealGetString(dealTicket, DEAL_COMMENT);
-   string id = ExtractIdFromComment(comment);
-   if(id=="") return;
-
-   if(PositionExistsForId(id)) return;
-   if(ArrayContainsStr(g_reportedIds, id)) return;
-
-   double price  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-   long   reason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
-   string reasonStr = "manual";
-   if(reason==DEAL_REASON_SL) reasonStr="sl";
-   else if(reason==DEAL_REASON_TP) reasonStr="tp";
-   else if(reason==DEAL_REASON_EXPERT) reasonStr="expert";
-   else if(reason==DEAL_REASON_CLIENT) reasonStr="client";
-
-   if(SendReport(id, price, reasonStr))
-      ArrayPushStr(g_reportedIds, id);
 }
 
 //+------------------------------------------------------------------+
@@ -204,45 +169,6 @@ ulong FindPositionTicketForId(const string id)
 }
 
 //+------------------------------------------------------------------+
-//| Find a closing deal for `id` in account history.                 |
-//| Returns true and fills price/reasonStr when found.               |
-//+------------------------------------------------------------------+
-bool FindClosingDealForId(const string id, double &outPrice, string &outReason)
-{
-   // Look back ~30 days; trades shouldn't outlive that horizon.
-   datetime to   = TimeCurrent() + 60;
-   datetime from = to - 30*24*60*60;
-   if(!HistorySelect(from, to)) return false;
-
-   int total = HistoryDealsTotal();
-   datetime bestTime = 0;
-   bool found = false;
-   for(int i=0;i<total;i++)
-   {
-      ulong dt = HistoryDealGetTicket(i);
-      if(dt==0) continue;
-      if((int)HistoryDealGetInteger(dt, DEAL_MAGIC) != g_magic) continue;
-      long entry = HistoryDealGetInteger(dt, DEAL_ENTRY);
-      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
-      string c = HistoryDealGetString(dt, DEAL_COMMENT);
-      if(ExtractIdFromComment(c) != id) continue;
-
-      datetime t = (datetime)HistoryDealGetInteger(dt, DEAL_TIME);
-      if(t < bestTime) continue; // pick the latest closing deal
-      bestTime = t;
-      outPrice = HistoryDealGetDouble(dt, DEAL_PRICE);
-      long reason = HistoryDealGetInteger(dt, DEAL_REASON);
-      if(reason==DEAL_REASON_SL) outReason="sl";
-      else if(reason==DEAL_REASON_TP) outReason="tp";
-      else if(reason==DEAL_REASON_EXPERT) outReason="expert";
-      else if(reason==DEAL_REASON_CLIENT) outReason="client";
-      else outReason="manual";
-      found = true;
-   }
-   return found;
-}
-
-//+------------------------------------------------------------------+
 //| HTTP helpers                                                     |
 //+------------------------------------------------------------------+
 string HttpGet(const string url)
@@ -264,23 +190,6 @@ string HttpGet(const string url)
       return "";
    }
    return CharArrayToString(result, 0, -1, CP_UTF8);
-}
-
-int HttpPostJson(const string url, const string body, string &response)
-{
-   char data[], result[];
-   string headers = "Content-Type: application/json\r\n";
-   string resp_headers;
-   StringToCharArray(body, data, 0, StringLen(body), CP_UTF8);
-   ResetLastError();
-   int code = WebRequest("POST", url, headers, 5000, data, result, resp_headers);
-   if(code==-1)
-   {
-      Print("WebRequest POST error ", GetLastError(), " url=", url);
-      return -1;
-   }
-   response = CharArrayToString(result, 0, -1, CP_UTF8);
-   return code;
 }
 
 //+------------------------------------------------------------------+
@@ -533,11 +442,6 @@ void PollAndAct()
    for(int i=0;i<n;i++) PlaceFromTrade(elems[i]);
 
    CacheServerTrades(elems);
-
-   // For every cached id, if there's no live order/position and no report yet,
-   // scan deal history. This catches closes that happened while the EA was off
-   // (e.g. SL hit, manual close).
-   ReconcileMissedCloses();
 }
 
 //+------------------------------------------------------------------+
@@ -545,9 +449,7 @@ void PollAndAct()
 //+------------------------------------------------------------------+
 string g_cacheIds[];
 double g_cachePartialTP[];
-string g_cacheDirection[];
 string g_cacheValidUntilUTC[];
-string g_cacheReportAtUTC[];
 string g_cacheCloseTimeUTC[];
 int    g_cacheCloseAfterMin[];
 
@@ -555,18 +457,14 @@ void CacheServerTrades(const string &elems[])
 {
    ArrayResize(g_cacheIds, 0);
    ArrayResize(g_cachePartialTP, 0);
-   ArrayResize(g_cacheDirection, 0);
    ArrayResize(g_cacheValidUntilUTC, 0);
-   ArrayResize(g_cacheReportAtUTC, 0);
    ArrayResize(g_cacheCloseTimeUTC, 0);
    ArrayResize(g_cacheCloseAfterMin, 0);
    for(int i=0;i<ArraySize(elems);i++)
    {
       string id  = JsonGetString(elems[i], "id");
-      string dir = JsonGetString(elems[i], "direction");
       string ptp = JsonGetString(elems[i], "partial_take_profit");
       string vu  = JsonGetString(elems[i], "valid_until_utc");
-      string ra  = JsonGetString(elems[i], "report_at_utc");
       string ct  = JsonGetString(elems[i], "close_time_utc");
       string cam = JsonGetString(elems[i], "close_after_minutes");
       int    cami = (cam=="" ? 0 : (int)StringToInteger(cam));
@@ -574,16 +472,12 @@ void CacheServerTrades(const string &elems[])
       int sz = ArraySize(g_cacheIds);
       ArrayResize(g_cacheIds,            sz+1);
       ArrayResize(g_cachePartialTP,      sz+1);
-      ArrayResize(g_cacheDirection,      sz+1);
       ArrayResize(g_cacheValidUntilUTC,  sz+1);
-      ArrayResize(g_cacheReportAtUTC,    sz+1);
       ArrayResize(g_cacheCloseTimeUTC,   sz+1);
       ArrayResize(g_cacheCloseAfterMin,  sz+1);
       g_cacheIds[sz]=id;
       g_cachePartialTP[sz]=p;
-      g_cacheDirection[sz]=dir;
       g_cacheValidUntilUTC[sz]=vu;
-      g_cacheReportAtUTC[sz]=ra;
       g_cacheCloseTimeUTC[sz]=ct;
       g_cacheCloseAfterMin[sz]=cami;
    }
@@ -639,9 +533,9 @@ void ManagePartials()
 
 //+------------------------------------------------------------------+
 //| Auto-close: when close_time passes, force-close any live         |
-//| position for this id (and cancel a still-pending order). The     |
-//| reconcile / EoD step will pick up the resulting closing deal and |
-//| report the real exit price.                                      |
+//| position for this id (and cancel a still-pending order).         |
+//| Trades with neither close_time nor close_after_minutes (manual   |
+//| close) are never closed by the EA.                               |
 //+------------------------------------------------------------------+
 void ManageAutoClose()
 {
@@ -738,93 +632,6 @@ void ManageExpiry()
       else
          Print("ZoneTrader: cancel failed id=", id, " err=", trade.ResultRetcodeDescription());
    }
-}
-
-//+------------------------------------------------------------------+
-//| End-of-day: send a report once report_at_utc passes, even if the |
-//| user keeps managing the position manually. Uses current bid/ask  |
-//| as the reported "exit_price" snapshot.                           |
-//+------------------------------------------------------------------+
-void ManageEndOfDay()
-{
-   datetime now = TimeGMT();
-   for(int i=0;i<ArraySize(g_cacheIds);i++)
-   {
-      string id = g_cacheIds[i];
-      if(id=="") continue;
-      if(ArrayContainsStr(g_reportedIds, id)) continue;
-
-      string ra = g_cacheReportAtUTC[i];
-      if(ra=="") continue;
-      datetime deadline = ParseISO8601UTC(ra);
-      if(deadline==0 || now < deadline) continue;
-
-      // Prefer the actual exit price if the position is already closed.
-      double price = 0;
-      string reason = "eod";
-      if(FindClosingDealForId(id, price, reason))
-      {
-         if(SendReport(id, price, reason))
-            ArrayPushStr(g_reportedIds, id);
-         continue;
-      }
-
-      // Position still open (or never opened). Snapshot current price.
-      string sym = _Symbol;
-      string dir = g_cacheDirection[i];
-      double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-      double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-      // Closing price for a long is bid, for a short is ask.
-      price = (dir=="short" ? ask : bid);
-      if(price<=0) continue;
-
-      if(SendReport(id, price, "eod"))
-         ArrayPushStr(g_reportedIds, id);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Reconcile: catch closes we may have missed while the EA was off  |
-//+------------------------------------------------------------------+
-void ReconcileMissedCloses()
-{
-   for(int i=0;i<ArraySize(g_cacheIds);i++)
-   {
-      string id = g_cacheIds[i];
-      if(id=="") continue;
-      if(ArrayContainsStr(g_reportedIds, id)) continue;
-      if(PositionExistsForId(id)) continue;
-      if(OrderExistsForId(id))    continue;
-
-      double price = 0;
-      string reason = "manual";
-      if(!FindClosingDealForId(id, price, reason)) continue;
-      if(SendReport(id, price, reason))
-         ArrayPushStr(g_reportedIds, id);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Send report to /reports/<SYMBOL>                                 |
-//+------------------------------------------------------------------+
-bool SendReport(const string id, double exitPrice, const string reason)
-{
-   string url = ServerURL + "/reports/" + g_baseSymbol;
-   string nowStr = TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS);
-   StringReplace(nowStr, ".", "-");
-   StringReplace(nowStr, " ", "T");
-   nowStr += "Z";
-
-   string body = StringFormat(
-      "{\"id\":\"%s\",\"exit_price\":%.5f,\"exit_reason\":\"%s\",\"exit_time\":\"%s\"}",
-      id, exitPrice, reason, nowStr);
-
-   string resp;
-   int code = HttpPostJson(url, body, resp);
-   if(code==201) { Print("ZoneTrader: reported id=", id, " exit=", exitPrice, " reason=", reason); return true; }
-   if(code==409) { Print("ZoneTrader: report duplicate id=", id); return true; }
-   Print("ZoneTrader: report failed id=", id, " code=", code, " resp=", resp);
-   return false;
 }
 
 //+------------------------------------------------------------------+

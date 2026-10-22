@@ -7,9 +7,9 @@ Stack: Vanilla html, use existing CSS variables for styling in public/index.html
 This should allow me to input trades. These parameters are required to be in input UI:
 Required: symbol (EURUSD, GBPUSD, USDJPY, EURGBP, AUDUSD, AUDNZD, EURJPY, USDCAD, XAUUSD), direction (long|short), stop loss price, level_type (watch|order|option), valid until (time; default=20:00)
 Conditionally required: limit price (required unless "market order" is checked)
-Optional: take profit price, partial take profit price, level_size (default=none, options=watched|medium|large), market order checkbox (when checked: no limit price, position is opened at market on EA pickup), close time (time; default=none - this is not a date but the time during the same day OR next day), close after minutes (positive integer; alternative to close time, counts from the moment the position is filled)
+Optional: take profit price, partial take profit price, level_size (default=none, options=watched|medium|large), market order checkbox (when checked: no limit price, position is opened at market on EA pickup), close time (time; default=none - this is not a date but a time on the same day as valid until), close after minutes (positive integer; alternative to close time, counts from the moment the position is filled), close manually checkbox (when checked: the EA never closes the position, I close it manually; clears and disables close time and close after minutes)
 
-close time and close after minutes are mutually exclusive.
+close time, close after minutes and close manually are mutually exclusive. Leaving close time and close after minutes empty also means the EA never closes the position.
 
 None means no value, not "none"
 
@@ -17,9 +17,9 @@ Date field and ID will be added automatically.
 
 Styling variables area already created at public/index.html
 
-The view should render historical trades below the input interface and if they were closed profitably based on the reports file. If they are not in the reports file and only exist as an order, they should be rendered as waiting.
+There is no history view. Past levels are not remembered and open positions are not tracked.
 
-level_type is record-keeping metadata only. It does not influence whether a trade is executed; every submitted trade is executed by the EA. The label is shown in history for the user's reference.
+level_type is record-keeping metadata only. It does not influence whether a trade is executed; every submitted trade is executed by the EA.
 
 ## Server
 
@@ -27,19 +27,18 @@ Stack: Express JS
 
 Listens on port 3001.
 
-get requests to /<SYMBOL> will return all active trades. A trade is active if it has not been reported yet and its report deadline (report_at_utc) is still in the future. The list intentionally is NOT filtered to "today only" so that:
+get requests to /<SYMBOL> will return all active trades. A trade is active while its active_until_utc is still in the future. The list intentionally is NOT filtered to "today only" so that:
   - trades using "valid_until next day" remain visible after midnight
   - filled limit orders remain visible so the EA can manage them after a restart
-  - close_after_minutes trades remain visible long enough for the EA to auto-close them and report
-post requests to /<SYMBOL> will create a new trade.
-post requests to /reports/<SYMBOL> will append reports.json file with the result adding a close/exit price; These requests have to be deduplicated based on an ID, because I will be running multiple instances of MT5 bot and only want a single report per position.
+  - close_after_minutes trades remain visible long enough for the EA to auto-close them
+post requests to /<SYMBOL> will create a new trade. Trades that are no longer active are dropped from trades.json at the same time; there is no history and no reports endpoint.
 
 The server is also responsible for providing correct time. Inputs from the web interface are in Central European Time (which can be winter or summer). The server should work in UTC.
 
-report_at_utc rules:
-  - if close_time is set: report_at_utc = close_time_utc
-  - else if close_after_minutes is set: report_at_utc = valid_until_utc + close_after_minutes + 60min buffer
-  - else: report_at_utc = 23:59 local of the valid_until date, in UTC
+active_until_utc rules:
+  - if close_time is set: active_until_utc = close_time_utc
+  - else if close_after_minutes is set: active_until_utc = valid_until_utc + close_after_minutes + 60min buffer
+  - else (manual close): active_until_utc = 23:59 local of the valid_until date, in UTC
 
 ## Metatrader 5 Bot
 
@@ -62,10 +61,7 @@ Position management:
   - Partial take profit: when partial_take_profit is reached, close 50% of the position rounded down to the volume step. Done at most once per id.
   - Auto-close (close_time): when close_time_utc passes, cancel any still-pending order for that id and PositionClose any open position for that id. The closing deal's real price is then reported.
   - Auto-close (close_after_minutes): once a position exists for the id, close it when (now - POSITION_TIME) >= close_after_minutes * 60. Pending orders are not affected by close_after_minutes; they expire at valid_until via the standard expiry path.
+  - Manual close (no close_time and no close_after_minutes): the EA never closes the position.
   - Expiry: pending limit orders past valid_until_utc are cancelled.
 
-Reporting (post to /reports/<SYMBOL>):
-  - On any closing deal seen via OnTradeTransaction: report once with the deal's actual exit price and reason (sl/tp/expert/client/manual).
-  - Reconcile-on-poll: if a cached id has no live order/position and no report sent yet, scan deal history for its closing deal and report it. This catches closes that happened while the EA was offline.
-  - End-of-day fallback: if report_at_utc passes and no closing deal exists yet (position still open or never opened), send a report with reason "eod" using the current bid/ask snapshot. This is only a fallback for trades the user manages manually without close_time / close_after_minutes.
-  - Each id is reported at most once (server also deduplicates by id with HTTP 409).
+The EA does not track or report closed positions.
